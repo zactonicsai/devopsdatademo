@@ -1,5 +1,8 @@
 # zacamikafka — Custom Kafka-Ready AMI
 
+
+terraform destroy -auto-approve
+
 This project builds a custom AWS AMI named **`zacamikafka`** from the latest Amazon Linux 2023 base image, pre-installed with **Python**, **Java 17 (Corretto)**, and **all Apache Kafka prerequisites**. It also provisions an IAM instance profile so instances launched from the AMI can be reached via **AWS Systems Manager (SSM) Session Manager** — no SSH keys or open inbound ports required.
 
 Three approaches are documented:
