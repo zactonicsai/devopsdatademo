@@ -1,0 +1,87 @@
+---
+###############################################################################
+# kafka-prereqs.yml
+# Ansible playbook to install Python, Java, and Kafka prerequisites on an
+# Amazon Linux 2023 host. Use this as an alternative (or complement) to the
+# Terraform user_data approach. Connect over SSH or the AWS SSM connection
+# plugin (community.aws.aws_ssm).
+###############################################################################
+
+- name: Provision Kafka prerequisites
+  hosts: all
+  become: true
+
+  vars:
+    kafka_version: "3.7.1"
+    scala_version: "2.13"
+    kafka_install_dir: "/opt"
+
+  tasks:
+    - name: Update all packages
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+
+    - name: Install Python and build tooling
+      ansible.builtin.dnf:
+        name:
+          - python3
+          - python3-pip
+          - python3-devel
+          - gcc
+          - make
+          - git
+          - tar
+          - wget
+        state: present
+
+    - name: Install Java 17 (Amazon Corretto)
+      ansible.builtin.dnf:
+        name:
+          - java-17-amazon-corretto
+          - java-17-amazon-corretto-devel
+        state: present
+
+    - name: Install networking / helper utilities
+      ansible.builtin.dnf:
+        name:
+          - nc
+          - telnet
+          - jq
+        state: present
+
+    - name: Download Apache Kafka
+      ansible.builtin.get_url:
+        url: "https://downloads.apache.org/kafka/{{ kafka_version }}/kafka_{{ scala_version }}-{{ kafka_version }}.tgz"
+        dest: "{{ kafka_install_dir }}/kafka.tgz"
+        mode: "0644"
+
+    - name: Extract Kafka
+      ansible.builtin.unarchive:
+        src: "{{ kafka_install_dir }}/kafka.tgz"
+        dest: "{{ kafka_install_dir }}"
+        remote_src: true
+
+    - name: Symlink /opt/kafka
+      ansible.builtin.file:
+        src: "{{ kafka_install_dir }}/kafka_{{ scala_version }}-{{ kafka_version }}"
+        dest: "/opt/kafka"
+        state: link
+
+    - name: Remove Kafka tarball
+      ansible.builtin.file:
+        path: "{{ kafka_install_dir }}/kafka.tgz"
+        state: absent
+
+    - name: Install Python Kafka client libraries
+      ansible.builtin.pip:
+        name:
+          - kafka-python
+          - confluent-kafka
+        executable: pip3
+
+    - name: Ensure SSM agent is enabled and running
+      ansible.builtin.systemd:
+        name: amazon-ssm-agent
+        enabled: true
+        state: started
