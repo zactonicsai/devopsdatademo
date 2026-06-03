@@ -149,14 +149,14 @@ resource "aws_instance" "builder" {
     # Python 3 + pip + dev tools
     dnf -y install python3 python3-pip python3-devel gcc make git tar wget
 
-    # Java 17 (Corretto) - required by Kafka
-    dnf -y install java-17-amazon-corretto java-17-amazon-corretto-devel
+    # Java 21 (Corretto, LTS) - supported by Kafka 4.x brokers/tools
+    dnf -y install java-21-amazon-corretto java-21-amazon-corretto-devel
 
     # Networking / Kafka helper utilities
     dnf -y install nc telnet jq
 
     # Kafka prerequisites: download Apache Kafka binaries
-    KAFKA_VERSION=3.7.1
+    KAFKA_VERSION=4.3.0
     SCALA_VERSION=2.13
     cd /opt
     wget -q "https://downloads.apache.org/kafka/$${KAFKA_VERSION}/kafka_$${SCALA_VERSION}-$${KAFKA_VERSION}.tgz"

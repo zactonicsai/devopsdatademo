@@ -12,7 +12,7 @@
   become: true
 
   vars:
-    kafka_version: "3.7.1"
+    kafka_version: "4.3.0"
     scala_version: "2.13"
     kafka_install_dir: "/opt"
 
@@ -35,11 +35,11 @@
           - wget
         state: present
 
-    - name: Install Java 17 (Amazon Corretto)
+    - name: Install Java 21 (Amazon Corretto, LTS)
       ansible.builtin.dnf:
         name:
-          - java-17-amazon-corretto
-          - java-17-amazon-corretto-devel
+          - java-21-amazon-corretto
+          - java-21-amazon-corretto-devel
         state: present
 
     - name: Install networking / helper utilities

@@ -1,9 +1,6 @@
 # zacamikafka — Custom Kafka-Ready AMI
 
-
-terraform destroy -auto-approve
-
-This project builds a custom AWS AMI named **`zacamikafka`** from the latest Amazon Linux 2023 base image, pre-installed with **Python**, **Java 17 (Corretto)**, and **all Apache Kafka prerequisites**. It also provisions an IAM instance profile so instances launched from the AMI can be reached via **AWS Systems Manager (SSM) Session Manager** — no SSH keys or open inbound ports required.
+This project builds a custom AWS AMI named **`zacamikafka`** from the latest Amazon Linux 2023 base image, pre-installed with **Python**, **Java 21 (Corretto, LTS)**, and **all Apache Kafka prerequisites**. It also provisions an IAM instance profile so instances launched from the AMI can be reached via **AWS Systems Manager (SSM) Session Manager** — no SSH keys or open inbound ports required.
 
 Three approaches are documented:
 1. **Terraform** (`main.tf`) — declarative, automated build.
@@ -15,8 +12,8 @@ Three approaches are documented:
 ## What gets installed
 
 - Python 3 + pip + dev/build tooling (`gcc`, `make`, `git`)
-- Java 17 (Amazon Corretto) and its devel package — Kafka runs on the JVM
-- Apache Kafka 3.7.1 binaries under `/opt/kafka`
+- Java 21 (Amazon Corretto, LTS) and its devel package — Kafka 4.x runs on the JVM (Java 17+; 21 and 25 also supported)
+- Apache Kafka 4.3.0 binaries under `/opt/kafka`
 - Networking/diagnostic tools: `nc`, `telnet`, `jq`
 - Python Kafka client libraries: `kafka-python`, `confluent-kafka`
 - SSM agent enabled (preinstalled on AL2023)
@@ -192,6 +189,53 @@ Requirements: the SSM agent running (baked into the AMI), the instance profile a
 
 ---
 
+## Kafka broker + health dashboard instance
+
+`kafka-instance.tf` launches a single EC2 instance **from the `zacamikafka` AMI** that runs two systemd services:
+
+1. **A single-node Apache Kafka broker in KRaft mode** (no ZooKeeper) — listening on `localhost:9092`, controller quorum on `localhost:9093`.
+2. **A Python health/test/metrics API + dashboard** (`kafka_api.py` serving `dashboard.html`) on `127.0.0.1:8080`.
+
+The dashboard is a Carbon-styled console with dark/light mode and live SVG graphs: throughput over time (sent vs received msg/s), round-trip latency (avg and p95), and a latency-distribution histogram. A round-trip test produces N messages of a chosen size to a topic, consumes them back, and measures end-to-end timing, surfacing average/p95 latency, throughput, and error rate.
+
+### Security model — SSM port-forwarding only
+
+The broker security group has **no inbound rules**. The dashboard binds to `127.0.0.1`, so it is never exposed to the network. You reach it by tunneling port 8080 to your laptop over Session Manager:
+
+```bash
+# from the Terraform output `dashboard_access_command`
+aws ssm start-session \
+  --target i-xxxxxxxxxxxxxxxxx \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+```
+
+Then open `http://localhost:8080` in your browser. For an interactive shell on the broker, use the `broker_shell_command` output (`aws ssm start-session --target i-xxxx`).
+
+### API endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/health` | Broker reachability, topic count, uptime |
+| GET | `/api/metrics` | Cumulative + rolling throughput/latency metrics and histogram |
+| POST | `/api/test` | Run a produce → consume round-trip test (`{count, size, topic}`) |
+
+### Building only the AMI (skip the instance)
+
+The instance is gated behind a variable. To build just the image:
+
+```bash
+terraform apply -var deploy_kafka_instance=false
+```
+
+### How the bootstrap works
+
+The dashboard and API files are injected into `user_data` via Terraform's `filebase64()` and decoded on the instance, which avoids any shell-escaping issues with the HTML/Python content. The script then writes a KRaft `server.properties`, formats the storage directory once (with a static `controller.quorum.voters`, so **without** `--standalone` — Kafka 4.2+ rejects combining the two), and registers both systemd units so the broker and dashboard survive reboots.
+
+> **Note on instance sizing:** the default is `t3.large` to give the JVM broker and the API enough memory headroom. Override with `-var kafka_instance_type=...`.
+
+---
+
 ## Pros and cons
 
 ### Terraform approach
@@ -260,6 +304,11 @@ aws ec2 create-image --instance-id i-xxxx --name zacamikafka \
 | File | Purpose |
 |------|---------|
 | `main.tf` | Terraform build of the `zacamikafka` AMI with SSM access |
+| `kafka-instance.tf` | Launches the KRaft broker + dashboard EC2 instance from the AMI (SSM-only) |
+| `dashboard.html` | Carbon-styled health/throughput console with live SVG graphs |
+| `kafka_api.py` | Python health/test/metrics API that drives the dashboard |
 | `kafka-prereqs.yml` | Ansible playbook installing the same prerequisites |
+| `zacamikafka-docs.html` | Standalone documentation page (Carbon style) |
 | `README.md` | This document |
-"# devopsdatademo" 
+
+> `kafka-instance.tf` reads `dashboard.html` and `kafka_api.py` from the same directory via `filebase64()`, so keep all four files together when running Terraform.
