@@ -230,7 +230,9 @@ terraform apply -var deploy_kafka_instance=false
 
 ### How the bootstrap works
 
-The dashboard and API files are injected into `user_data` via Terraform's `filebase64()` and decoded on the instance, which avoids any shell-escaping issues with the HTML/Python content. The script then writes a KRaft `server.properties`, formats the storage directory once (with a static `controller.quorum.voters`, so **without** `--standalone` — Kafka 4.2+ rejects combining the two), and registers both systemd units so the broker and dashboard survive reboots.
+EC2 `user_data` is hard-capped at 16 KB, and the dashboard plus API exceed that even when compressed. So Terraform creates a **private S3 bucket**, uploads `dashboard.html` and `kafka_api.py` to it, and grants the instance's SSM role read access. At boot, the small `user_data` script pulls both files from S3 using the instance role, writes a KRaft `server.properties`, formats the storage directory once (with a static `controller.quorum.voters`, so **without** `--standalone` — Kafka 4.2+ rejects combining the two), and registers both systemd units so the broker and dashboard survive reboots.
+
+A nice side effect: the app is **decoupled from the AMI**. Edit `dashboard.html` or `kafka_api.py` and run `terraform apply` — the `etag`/`filemd5` triggers a re-upload, and the change lands on the next instance boot without rebuilding the image. The bucket has all public access blocked and `force_destroy = true` so `terraform destroy` cleans it up.
 
 > **Note on instance sizing:** the default is `t3.large` to give the JVM broker and the API enough memory headroom. Override with `-var kafka_instance_type=...`.
 

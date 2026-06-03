@@ -45,27 +45,96 @@ resource "aws_security_group" "kafka" {
 }
 
 ###############################################################################
-# Render the user-data bootstrap. The dashboard + API files are injected as
-# base64 so their HTML/Python content needs no shell escaping.
+# App delivery via S3.
+#
+# WHY S3 (not inline user_data): EC2 user_data is hard-capped at 16 KB. The
+# dashboard + API are larger than that even base64/gzipped, so we host them in
+# a private S3 bucket and have the instance pull them at boot using its IAM
+# role. This also DECOUPLES the app from the AMI: edit dashboard.html or
+# kafka_api.py and `terraform apply` re-uploads them — no AMI rebuild needed.
+###############################################################################
+
+# Random suffix so the bucket name is globally unique.
+resource "random_id" "bucket" {
+  count       = var.deploy_kafka_instance ? 1 : 0
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "app" {
+  count         = var.deploy_kafka_instance ? 1 : 0
+  bucket        = "${var.ami_name}-app-${random_id.bucket[0].hex}"
+  force_destroy = true
+  tags          = { Name = "${var.ami_name}-app" }
+}
+
+resource "aws_s3_bucket_public_access_block" "app" {
+  count                   = var.deploy_kafka_instance ? 1 : 0
+  bucket                  = aws_s3_bucket.app[0].id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# Upload the two app files. etag triggers re-upload whenever the file changes.
+resource "aws_s3_object" "dashboard" {
+  count        = var.deploy_kafka_instance ? 1 : 0
+  bucket       = aws_s3_bucket.app[0].id
+  key          = "dashboard.html"
+  source       = "${path.module}/dashboard.html"
+  etag         = filemd5("${path.module}/dashboard.html")
+  content_type = "text/html"
+}
+
+resource "aws_s3_object" "api" {
+  count  = var.deploy_kafka_instance ? 1 : 0
+  bucket = aws_s3_bucket.app[0].id
+  key    = "kafka_api.py"
+  source = "${path.module}/kafka_api.py"
+  etag   = filemd5("${path.module}/kafka_api.py")
+}
+
+# Allow the instance's SSM role to read this bucket.
+resource "aws_iam_role_policy" "app_read" {
+  count = var.deploy_kafka_instance ? 1 : 0
+  name  = "${var.ami_name}-app-read"
+  role  = aws_iam_role.ssm.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:ListBucket"]
+      Resource = [aws_s3_bucket.app[0].arn, "${aws_s3_bucket.app[0].arn}/*"]
+    }]
+  })
+}
+
+###############################################################################
+# Bootstrap script. Small now — it fetches the app from S3 rather than
+# embedding it, so it stays well under the 16 KB user_data limit.
+# Flush-left: inner heredocs write config verbatim, so no indentation.
 ###############################################################################
 locals {
-  dashboard_b64 = filebase64("${path.module}/dashboard.html")
-  api_b64       = filebase64("${path.module}/kafka_api.py")
+  app_bucket_id = one(aws_s3_bucket.app[*].id)
 
-  # NOTE: this script is intentionally flush-left (no indentation). The inner
-  # cat heredocs write config files verbatim, so leading whitespace would
-  # corrupt server.properties and the systemd units. Keep it left-aligned.
   kafka_user_data = <<EOF
 #!/bin/bash
 set -euxo pipefail
 
 APP_DIR=/opt/kafka-console
 KAFKA_HOME=/opt/kafka
+BUCKET=${local.app_bucket_id}
 mkdir -p "$APP_DIR"
 
-# ---- write the dashboard + API from the injected base64 blobs ----
-echo "${local.dashboard_b64}" | base64 -d > "$APP_DIR/dashboard.html"
-echo "${local.api_b64}" | base64 -d > "$APP_DIR/kafka_api.py"
+# ---- fetch the dashboard + API from S3 (instance role grants read) ----
+for i in $(seq 1 30); do
+  if aws s3 cp "s3://$BUCKET/dashboard.html" "$APP_DIR/dashboard.html" --region ${var.aws_region} && \
+     aws s3 cp "s3://$BUCKET/kafka_api.py" "$APP_DIR/kafka_api.py" --region ${var.aws_region}; then
+    break
+  fi
+  echo "waiting for S3 objects / credentials... ($i)"; sleep 5
+done
 
 # ---- ensure the Kafka python client is present (AMI already has it) ----
 pip3 install --no-cache-dir confluent-kafka >/dev/null 2>&1 || true
@@ -175,6 +244,14 @@ resource "aws_instance" "kafka" {
     Name = "${var.ami_name}-broker"
     Role = "kafka-broker-dashboard"
   }
+
+  # Ensure the app files and read policy exist before the instance boots
+  # and tries to fetch them.
+  depends_on = [
+    aws_s3_object.dashboard,
+    aws_s3_object.api,
+    aws_iam_role_policy.app_read,
+  ]
 }
 
 ###############################################################################

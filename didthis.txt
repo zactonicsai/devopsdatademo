@@ -1,0 +1,14 @@
+
+terraform init
+terraform apply
+
+terraform output dashboard_access_command
+
+curl -o "%TEMP%\SessionManagerPluginSetup.exe" https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe && "%TEMP%\SessionManagerPluginSetup.exe" /quiet
+setx /M PATH "%PATH%;C:\Program Files\Amazon\SessionManagerPlugin\bin"
+
+
+copy "C:\Program Files\Amazon\SessionManagerPlugin\bin\session-manager-plugin.exe" .
+
+aws ssm start-session --target i-09b8f7082da0025ae --document-name AWS-StartPortForwardingSession --parameters file://params.json
+
